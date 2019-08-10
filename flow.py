@@ -13,6 +13,7 @@ from collections import OrderedDict
 #
 
 dt_fmt_str = "%Y-%m-%d %H:%M:%S"
+dt_fmt_str_re = r"(\d\d\d\d)-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)"
 project_name_validator_re = r"[a-zA-Z_\-0-9]+(\.([a-zA-Z_\-0-9]+))+"
 
 
@@ -49,52 +50,82 @@ def connect():
 
 
 def project_name_validator(project_name):
-    return re.match(project_name_validator_re, project_name)
+    return bool(re.match(project_name_validator_re, project_name))
 
 
 def new_project_name_validator(new_project_name, cursor):
     if not project_name_validator(new_project_name):
         return False
-    cursor.execute("SELECT count(*) FROM project WHERE name=?", (new_project_name,))
+    cursor.execute("SELECT count(*) FROM project WHERE name=?",
+                   (new_project_name,))
     return not cursor.fetchone()[0]
 
 
+def date_time_validator(s):
+    return bool(re.match(dt_fmt_str_re, s))
+
+
+def int_validator(s):
+    return bool(re.match(r"([0-9_]+)", s))
+
+
 class Project(object):
-    def __init__(self, id_, name, desc, create_dt):
+    def __init__(self, id_, name, create_dt_text, info_json_text):
         super().__init__()
+        
+        if create_dt_text:
+            create_py_dt = datetime.datetime.strptime(create_dt_text, dt_fmt_str)
+        else:
+            create_py_dt = None
+        
+        if info_json_text:
+            info_json_map = json.loads(info_json_text)
+        else:
+            info_json_map = None
+
         self.id = id_
         self.name = name
-        self.desc = desc 
-        self.create_dt = create_dt
+        self.create_dt = create_py_dt
+        self.info = info_json_map
 
     @staticmethod
     def search(search_str, cursor):
         san_str_content = sql_sanitize_str_content(search_str)
-        cursor.execute("SELECT id, name, description, create_dt FROM project "
-                       f"WHERE name LIKE '%{san_str_content}%'")
-        
+        cursor.execute(
+            "SELECT id, name, create_dt, info_json FROM project "
+            f"WHERE name LIKE '%{san_str_content}%'"
+        )
         for sql_tuple in cursor.fetchall():
-            id_, name, desc, create_dt_text = sql_tuple
-            create_dt = datetime.datetime.strptime(create_dt_text, dt_fmt_str)
-            yield Project(id_, name, desc, create_dt)
+            id_, name, create_dt_text, info_json_raw = sql_tuple
+            yield Project(id_, name, create_dt_text, info_json_raw)
 
     @staticmethod
-    def create(name, desc, py_dt, cursor):
-        assert new_project_name_validator(name, cursor)
-        cursor.execute("INSERT INTO project (name, description, create_dt) VALUES (?,?,?)",
-                       (name, desc, py_dt.strftime(dt_fmt_str)))
+    def create_husk_to_insert(name, create_dt):
+        project = Project(None, name, None, None)
+        project.info = {"complete": False}
+        project.create_dt = create_dt
+        return project
+
+    def insert(self, cursor):    
+        assert new_project_name_validator(self.name, cursor)
+        create_dt_text = self.create_dt.strftime(dt_fmt_str)
+        json_text = json.dumps(self.info)
+        cursor.execute(
+            "INSERT INTO project (name, create_dt, info_json) VALUES (?,?,?)",
+            (self.name, create_dt_text, json_text)
+        )
 
     def __str__(self):
         return f"Project(id={self.id},name={repr(self.name)},desc={repr(self.desc)}," + \
                f"create_dt={repr(self.create_dt.strftime(dt_fmt_str))})"
-            
+
 
 class Work(object):
-    def __init__(self, id_, project_id, start_py_dt, end_py_dt, duration_sec, note, info_json):
+    def __init__(self, id_, project_id, beg_py_dt, end_py_dt, duration_sec, note, info_json):
         super().__init__()
         self.id = id_
         self.project_id = project_id
-        self.start_dt = start_py_dt
+        self.beg_dt = beg_py_dt
         self.end_dt = end_py_dt
         self.duration_sec = duration_sec
         self.note = note
@@ -111,31 +142,33 @@ class Work(object):
         note = None
         info_json = json.dumps({"dirty": True})
         cursor.execute(
-            "INSERT INTO work (project_id, start_dt, end_dt, duration_sec, "
-            "note, info_json) VALUES (?,?,?,?,?,?)",
-            (project_id, start_dt_text, end_dt_text, duration_sec, note,
-            info_json))
+            "INSERT INTO work (project_id, beg_dt, end_dt, duration_sec, note, info_json) VALUES (?,?,?,?,?,?)",
+            (project_id, start_dt_text, end_dt_text, duration_sec, note, info_json))
         id_ = cursor.lastrowid
         return Work(id_, project_id, start_dt, end_dt, duration_sec, note, info_json)
-        
+
     def save(self, new_end_dt, cursor):
         self.end_dt = new_end_dt
-        self.duration_sec = round((self.end_dt - self.start_dt).total_seconds(), 0)
+        self.duration_sec = round(
+            (self.end_dt - self.beg_dt).total_seconds(), 0)
 
         end_dt_str = self.end_dt
         if not self.dirty:
             cursor.execute("SELECT info_json FROM work WHERE id=?", (self.id,))
             row = cursor.fetchone()
-            assert row    
+            assert row
             info = json.loads(row[0])
-            
+
             info["dirty"] = False
             self.info_json = json.dumps(info)
-            
+
             cursor.execute(
                 "UPDATE work SET note=?,info_json=?,end_dt=?,duration_sec=? WHERE id=?",
-                (self.note, self.info_json, end_dt_str, self.duration_sec, self.id)
-            )
+                (self.note,
+                 self.info_json,
+                 end_dt_str,
+                 self.duration_sec,
+                 self.id))
         else:
             cursor.execute(
                 "UPDATE work SET end_dt=?,duration_sec=? WHERE id=?",
@@ -157,17 +190,25 @@ def wipe_print(*args, **kwargs):
     print(*args, **kwargs)
 
 
-def line_input_text(prompt, validator=lambda s: bool(s), validation_msg="The input you provided was empty. Try again."):
+def str_non_empty_validator(s):
+    return bool(s)
+
+
+def line_input_text(prompt, validator=str_non_empty_validator, 
+                    validation_msg="The input you provided was empty. Try again."):
     if validator is None:
-        validator = lambda x: True
+        def validator(x): return True
 
     text = input(prompt).strip()
     if validator(text):
         return text
     else:
         print(validation_msg)
-        return line_input_text(prompt, validator=validator, validation_msg=validation_msg)
-            
+        return line_input_text(
+            prompt,
+            validator=validator,
+            validation_msg=validation_msg)
+
 
 def combo_input(title, option_tuples, default=None):
     assert option_tuples
@@ -178,7 +219,8 @@ def combo_input(title, option_tuples, default=None):
     # Breaking the option list into pages:
     choice_chars = "0123456789abcdefghijklmnopqrstuvwxyz"
     page_length = len(choice_chars)
-    num_pages = (len(option_map) // page_length) + (1 if len(key_list) % page_length else 0)
+    num_pages = (len(option_map) // page_length) + \
+        (1 if len(key_list) % page_length else 0)
     if num_pages == 1:
         choice_chars = choice_chars[:len(key_list)]
         valid = False
@@ -186,20 +228,22 @@ def combo_input(title, option_tuples, default=None):
             print(title)
             for choice_char, page in zip(choice_chars, key_list):
                 print(f"Enter [{choice_char}] to {page}")
-            
+
             if default is not None:
                 default_index = list(option_map.values()).index(default)
-                choice_str = input(f"Your choice (default: {choice_chars[default_index]}): ").strip()
+                choice_str = input(
+                    f"Your choice (default: {choice_chars[default_index]}): ").strip()
             else:
                 assert default is None
                 print(f"Enter [Return] to cancel.")
                 choice_str = input(f"Your choice: ").strip()
-            
+
             if not choice_str:
                 return default
 
             try:
-                choice_int = -1 if not choice_str else choice_chars.index(choice_str[0])
+                choice_int = - \
+                    1 if not choice_str else choice_chars.index(choice_str[0])
                 valid = choice_int >= 0
             except ValueError:
                 valid = False
@@ -220,6 +264,25 @@ def combo_input(title, option_tuples, default=None):
         raise NotImplementedError
 
 
+def date_time_input(title):
+    full_title = f"{title}\n(NOTE: Please enter your text in the format {dt_fmt_str}, or {dt_fmt_str_re})"
+    text = line_input_text(
+        full_title, 
+        validator=date_time_validator, 
+        validation_msg="The date-time you selected was invalid. Try again."
+    )
+    return datetime.strptime(text, dt_fmt_str)
+
+
+def int_input(title):
+    int_text = line_input_text(
+        title, 
+        validator=int_validator, 
+        validation_msg="The input you provided was not a valid integer. Try again."
+    )
+    return int(int_text)
+
+
 def notify(message):
     input(f"{message}\nHit [Return] to continue...")
 
@@ -231,14 +294,34 @@ def confirm(message, default=True):
     if input_text:
         return input_text[0] in ('y', 'Y')
     else:
-        return default
+        return bool(default)
 
 
 def project_print(project):
+    print("Creating the following project:")
+    print(f"- Name: {repr(project.name)}")
+    print(f"- Creation timestamp: {project.create_dt.strftime(dt_fmt_str)}")
+    if "desc" in project.info:
+        print(f"- Notes:")
+        for time_stamp, text in project.info["desc"]:
+            print(f"  - {time_stamp}\n    {text}")
+    if "deadline" in project.info:
+        print(f"- Deadline: True")
+        print(f"- Deadline date-time: {project.info['deadline'].strftime(dt_fmt_str)}")
+        print(f"- Allow me to change my deadline later: {project.info['deadline_mut']}")
+    else:
+        print(f"- Deadline: False")
+    print(f"- Complete: {project.info['complete']}")
+    print(f"- Budgeted work hours: {project.info['budget']}")
+    
     print(f"Project name: {repr(project.name)}")
-    print(f"Project description: {repr(project.desc)}")
     print(f"Creation timestamp: {project.create_dt.strftime(dt_fmt_str)}")
-    print(f"Project ID: {project.id}")
+    for k, v in project.info.items():
+        if k == "deadline":
+            print(f"Deadline: {v.strftime(dt_fmt_str)}")
+    
+    if project.id:
+        print(f"Project ID: {project.id}")
 
 
 def project_select(title):
@@ -246,23 +329,21 @@ def project_select(title):
         cursor = connection.cursor()
         while True:
             wipe()
-            search_str = line_input_text("= SEARCH BAR =\nEnter a project-name search string fragment: ",
-                                         validator=None)
+            search_str = line_input_text(
+                "= SEARCH BAR =\nEnter a project-name search string fragment: ",
+                validator=None)
             result_project_list = list(Project.search(search_str, cursor))
             if not result_project_list:
-                notify("No results found!")
+                if confirm("No results found! Return to the previous menu?"):
+                    break
+            result_tuples_iter = map(lambda p: (p.name, p), result_project_list)
+            result_tuples = list((*result_tuples_iter, ("return to the previous menu.", "return")))
+            project_input = combo_input("= SEARCH RESULTS =\nSelect a project to work on:", result_tuples)
+            if project_input == "return":
+                return "return"
+            elif project_input:
+                return project_input
             else:
-                result_tuples_iter = map(
-                    lambda result_project: (result_project.name, result_project),
-                    result_project_list
-                )
-                result_tuples = tuple((*result_tuples_iter, ("return to the previous menu.", "return")))
-                project_input = combo_input("= SEARCH RESULTS =\nSelect a project to work on:", result_tuples)
-                if project_input == "return":
-                    return "return"
-                elif project_input:
-                    return project_input
-                else:
                     return None
 
 
@@ -273,7 +354,8 @@ def project_select(title):
 def create_work_main():
     while True:
         wipe_print("Work")
-        selected_project = project_select("Select a project to start working on:")
+        selected_project = project_select(
+            "Select a project to start working on:")
         if selected_project == "return":
             return
         elif selected_project:
@@ -289,14 +371,16 @@ def work_screen(project):
     update_sec_interval = 30
     next_update_sec = update_sec_interval
     work_start_time = datetime.datetime.now()
-    
+
     with connect() as connection:
         cursor = connection.cursor()
         new_work = Work.new(project.id, work_start_time, cursor)
 
     while True:
         try:
-            net_elapsed_sec = (datetime.datetime.now() - work_start_time).total_seconds()
+            net_elapsed_sec = (
+                datetime.datetime.now() -
+                work_start_time).total_seconds()
             if net_elapsed_sec > next_update_sec:
                 next_update_sec += update_sec_interval
                 with connect() as connection:
@@ -306,24 +390,29 @@ def work_screen(project):
                     auto_save_msg = f"[Last auto-saved at {auto_save_dt_text}]"
 
             time_str = sec_to_hms_str(net_elapsed_sec)
-            print(f"\rWorking on {repr(project.name)} for... {time_str} [Ctrl+C to pause] "
-                  f"{auto_save_msg}",
-                  end=" ")
+            print(
+                f"\rWorking on {repr(project.name)} for... {time_str} [Ctrl+C to pause] "
+                f"{auto_save_msg}", end=" ")
             time.sleep(1)
+
         except KeyboardInterrupt:
             work_end_time = datetime.datetime.now()
             options = [
                 ("continue.", "c"),
                 ("stop.", "s")
             ]
-            choice = combo_input(f"Working on {repr(project.name)}: PAUSED", options, default='c')
+            choice = combo_input(
+                f"Working on {repr(project.name)}: PAUSED",
+                options,
+                default='c')
             if choice == 'c':
                 continue
             elif choice == 's':
                 if confirm("Are you sure you want to end this session?"):
                     break
 
-    new_work.note = line_input_text("Enter a short note to commemorate this work session: ")
+    new_work.note = line_input_text(
+        "Enter a short note to commemorate this work session: ")
     new_work.dirty = False
     with connect() as connection:
         cursor = connection.cursor()
@@ -348,7 +437,11 @@ def manage_project_main():
 
     if selected_project:
         project_print(selected_project)
-        notify("This feature has not yet been implemented. Come back later for more!")
+        option_tuple = [
+            ("Mark as complete", "c"),
+            ("Amend description", "m")
+        ]
+        # TODO: Add a 'modify deadline' option if the project's deadline is mutable.
 
 
 def create_project_main():
@@ -356,24 +449,42 @@ def create_project_main():
         cursor = connection.cursor()
         print("Hit Ctrl+C at any time to cancel this form.")
         try:
+            create_dt = datetime.datetime.now()
+            info = {}
+
             new_project_name = line_input_text(
                 "Enter the new project's name: ", 
-                validator=lambda s: new_project_name_validator(s, cursor), 
-                validation_msg=f"Invalid project name!\n"
-                                "Must:\n"
-                                f"- Satisfy the regular expression {repr(project_name_validator_re)}\n"
-                                "  Eg: flow_extra.examples.eg-1\n"
-                                "- Not already exist"
+                validator=lambda s: new_project_name_validator(s, cursor),
+                validation_msg=(
+                    f"Invalid project name!\n"
+                    "Must:\n"
+                    f"- Satisfy the regular expression {repr(project_name_validator_re)}\n"
+                    "  Eg: flow_extra.examples.eg-1\n"
+                    "- Not already exist"
+                )
             )
-            new_project_desc = line_input_text("Enter the new project's description: ", validator=None)
-            create_dt = datetime.datetime.now()
-            print("Creating the following project:")
-            print(f"- Name: {repr(new_project_name)}")
-            print(f"- Description: {repr(new_project_desc)}")
-            print(f"- Creation timestamp: {create_dt.strftime(dt_fmt_str)}")
+            
+            p = Project.create_husk_to_insert(new_project_name, create_dt)
+
+            new_project_desc = line_input_text(
+                "Enter the new project's description: ", 
+                validator=None
+            )
+            if new_project_desc:
+                p.info["desc"] = [(create_dt.strftime(dt_fmt_str), new_project_desc)]
+            else:
+                print("Empty description ignored.")
+
+            if confirm("Does this project have a deadline?", default=False):
+                p.info["deadline"] = date_time_input("Enter the new project's deadline").strftime(dt_fmt_str)
+                p.info["deadline_mut"] = confirm("Allow me to change this deadline in the future?")
+            
+            p.info["budget"] = int_input("How many hours of work do you think this project will take to complete? ")
+
+            project_print(p)
             if confirm("Is this okay?"):
-                Project.create(new_project_name, new_project_desc, create_dt, cursor)
-        
+                p.insert(cursor)
+
         except KeyboardInterrupt:
             return
 
@@ -398,7 +509,10 @@ def main():
                 ("manage past work.", 'wm'),
                 ("quit", 'q')
             )
-            choice_id = combo_input("Select a context to navigate to:", choice_tuple, default='w')
+            choice_id = combo_input(
+                "Select a context to navigate to:",
+                choice_tuple,
+                default='wn')
             if choice_id is None:
                 print("Bye-bye!")
             elif choice_id == 'wn':
@@ -424,7 +538,7 @@ if __name__ == "__main__":
 
 
 # Commands:
-# flow 
+# flow
 # flow -h
 # flow p[roject] ["project-id-prefix"]
 # flow w[ork] "project-id-prefix"
