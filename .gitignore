@@ -1,5 +1,4 @@
 # https://www.atlassian.com/git/tutorials/saving-changes/gitignore
-*.db
 .idea
 .vscode
 _venv
