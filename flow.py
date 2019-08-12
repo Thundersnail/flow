@@ -96,7 +96,7 @@ def str_to_dt(s):
 # Validators:
 #
 
-def default_validator(s):
+def default_validator(_):
     return ResultOk()
 
 
@@ -233,8 +233,11 @@ class Task(object):
     <!DOCTYPE html>
     <html lang="en">
         <head>
-            <title>Project Report</title>
+            <title>
+    """
 
+    html_mid = """
+            </title>
             <style>
                 sys {
                     font-family: "Lucida Console", Monaco, monospace;
@@ -253,6 +256,15 @@ class Task(object):
         self.name = name
         self.beg_dt = beg_dt
         self.status = status
+
+    @staticmethod
+    def get(id_, cursor):
+        res = cursor.execute("SELECT name, cache_beg_dt, cache_status_code FROM task WHERE id=?", (id_,))
+        row = res.fetchone()
+        if row:
+            name, beg_dt_str, status_code = row
+            beg_dt = str_to_dt(beg_dt_str)
+            return Task(id_, name, beg_dt, status_code)
 
     @staticmethod
     def new(name, first_msg, cursor):
@@ -307,6 +319,7 @@ class Task(object):
 
         # Changing the task's completion status:
         cursor.execute("UPDATE task SET cache_status_code=? WHERE id=?", (new_status, self.id))
+        assert cursor.lastrowid
 
     def print_to_html(self, file_path, cursor):
         with open(file_path, "w") as f:
@@ -315,6 +328,9 @@ class Task(object):
                 return print(*args, **kwargs, file=f)
 
             f_print(Task.html_beg)
+            f_print(self.name)
+            f_print(Task.html_mid)
+
             f_print(f"<h1>{self.name}</h1>")
 
             if self.status == IN_PROGRESS_TASK_STATUS:
@@ -328,10 +344,18 @@ class Task(object):
             f_print(f"<p><sys>Status: {status_str}</sys></p>")
 
             row = cursor.execute("SELECT SUM(cache_duration_sec) FROM work WHERE task_id=?", (self.id,))
-            net_duration_sec = row.fetchone()[0]
+            raw_net_duration_sec = row.fetchone()[0]
+            if raw_net_duration_sec:
+                net_duration_sec = int(raw_net_duration_sec)
+            else:
+                net_duration_sec = 0
+
             row = cursor.execute("SELECT COUNT(*), sum(duration_sec) FROM break WHERE task_id=?", (self.id,))
             num_breaks, raw_break_duration_sec = row.fetchone()
-            if raw_break_duration_sec is None:
+            if not num_breaks:
+                num_breaks = 0
+
+            if not raw_break_duration_sec:
                 break_duration_sec = 0
             else:
                 break_duration_sec = round_sec_to_int(raw_break_duration_sec)
@@ -367,11 +391,11 @@ class Task(object):
             f_print("<h2><sys>Work and Breaks:</sys></h2>")
             f_print("<ul>")
             res = cursor.execute("SELECT id, cache_beg_dt, cache_duration_sec FROM work WHERE task_id=?", (self.id,))
-            for work_id, beg_dt, duration_sec in res:
+            for work_id, beg_dt, net_duration_sec in res:
                 f_print("<li>")
 
                 f_print(f"<sys>[{beg_dt}]</sys><br/>")
-                f_print(f"<sys>Net duration: {sec_to_hms_str(duration_sec)}</sys><br/>")
+                f_print(f"<sys>Net duration: {sec_to_hms_str(net_duration_sec)}</sys><br/>")
 
                 agg_res = cursor.execute("SELECT COUNT(*), SUM(duration_sec) FROM break WHERE work_id=?", (work_id,))
                 num_breaks, total_break_duration = agg_res.fetchone()
@@ -386,10 +410,6 @@ class Task(object):
                 f_print("</ol>")
 
             f_print(Task.html_end)
-
-    def __str__(self):
-        id_str = str(self.id) if self.id else "<husk>"
-        return f"Task(id={id_str},name={repr(self.name)},create_dt={repr(dt_to_str(self.create_dt))})"
 
 
 class Work(object):
@@ -460,9 +480,7 @@ def wipe_print(*args, **kwargs):
 
 
 def line_input_text(prompt, validator=default_validator):
-    if validator is None:
-        def validator(x): return True
-
+    assert validator
     text = input(prompt).strip()
     validation = validator(text)
     assert isinstance(validation, Result)
@@ -699,7 +717,11 @@ def search_task_main():
 
 
 def view_task_main(selected_task):
+    selected_task_id = selected_task.id
     while True:
+        with connect() as connection:
+            selected_task = Task.get(selected_task_id, connection)
+
         option_tuple = [
             ("Print Record [HTML]", "pf")
         ]
@@ -728,6 +750,7 @@ def view_task_main(selected_task):
 
         with connect() as connection:
             cursor = connection.cursor()
+
             if choice == "pf":
                 file_path = line_input_text("Enter a file-path for the generated HTML info file: ",
                                             validator=file_path_validator)
@@ -757,7 +780,7 @@ def view_task_main(selected_task):
                     print(f"Note: {repr(note)}")
                     print(f"Time: {dt_to_str(time_stamp)}")
                     if confirm("Add note?"):
-                        selected_task.add_note()
+                        Note.new(selected_task.id, None, time_stamp, note, "view-task-user-note", cursor)
                         break
 
 
@@ -766,7 +789,6 @@ def create_task_main():
         cursor = connection.cursor()
         print("Enter [Ctrl + C] at any time to cancel this form.")
         try:
-            create_dt = datetime.datetime.now()
             new_task_name = line_input_text("Enter the new task's name: ",
                                             validator=lambda s: new_task_name_validator(s, cursor))
             first_msg = line_input_text("Enter the first note you would like to add to this project: ",
