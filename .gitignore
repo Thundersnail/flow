@@ -1,3 +1,5 @@
+.idea
+.vscode
 _venv
 _db
 files
