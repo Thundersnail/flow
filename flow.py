@@ -154,7 +154,7 @@ def file_path_validator(file_path):
     dir_path, file_name = path.split(file_path)
     if not dir_path:
         dir_path = os.getcwd()
-        
+
     if not path.exists(dir_path):
         return ResultFail(f"The directory '{dir_path}' does not exist.\n"
                           f"Absolute path: '{path.abspath(dir_path)}'")
@@ -334,7 +334,7 @@ class Task(object):
             f_print(self.name)
             f_print(Task.html_mid)
 
-            f_print(f"<h1>{self.name}</h1>")
+            f_print(f"<h1><sys>{self.name}</sys></h1>")
 
             if self.status == IN_PROGRESS_TASK_STATUS:
                 status_str = f"IN_PROGRESS ({self.status})"
