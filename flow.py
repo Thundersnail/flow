@@ -1,14 +1,12 @@
+import sys
 from os import path
 from typing import *
 import re
 import time
 import os
 import subprocess
-import json
 import sqlite3
 import datetime
-import argparse
-from collections import OrderedDict
 
 #
 #
@@ -16,7 +14,7 @@ from collections import OrderedDict
 #
 #
 
-db_path = "./_db/flow.db"
+db_path = path.join(path.dirname(sys.argv[0]), "_db/flow.db")
 dt_fmt_str_readable = "YYYY/MM/DD HH:MM:SS"
 dt_fmt_str_readable_eg = "1999/02/04 00:15:00"
 dt_fmt_str = "%Y-%m-%d %H:%M:%S"
@@ -160,6 +158,7 @@ def file_path_validator(file_path):
             return ResultFail(f"You chose not to overwrite the existing file at '{abs_file_path}'.")
     return ResultOk()
 
+
 #
 # We use a custom 'record' writing model. It's quite simple.
 #
@@ -217,7 +216,7 @@ class Task(object):
     <html lang="en">
         <head>
             <title>Project Report</title>
-            
+
             <style>
                 sys {
                     font-family: "Lucida Console", Monaco, monospace;
@@ -522,17 +521,19 @@ def task_select(desc, only_open=False):
                 cb = confirm("No results found! Continue searching? ", default=True)
                 if not cb:
                     # In these cases, we want to pop to the previous menu.
-                    return "return"
+                    return None
             else:
                 result_tuples_iter = map(lambda p: (p.name, p), result_task_list)
                 result_tuples = list((*result_tuples_iter, ("return to the previous menu.", "return")))
-                task_input = combo_input("= SEARCH RESULTS =\nSelect a task to work on:", result_tuples)
-                if task_input == "return":
-                    return "return"
-                elif task_input:
-                    return task_input
-                else:
+                task_input = combo_input("= SEARCH RESULTS =\nSelect a task to work on [default = continue searching]:",
+                                         result_tuples)
+                if task_input is None:
                     return None
+                elif task_input == "return":
+                    return "return"
+                else:
+                    assert isinstance(task_input, Task)
+                    return task_input
 
 
 #
@@ -543,8 +544,10 @@ def work_main():
     while True:
         wipe_print("Work")
         selected_task = task_select("Select an *OPEN* task to start working on:", only_open=True)
-        if selected_task == "return":
-            return
+        if selected_task is None:
+            continue
+        elif selected_task == "return":
+            break
         elif selected_task:
             assert isinstance(selected_task, Task)
             if confirm(f"Selected task: '{selected_task.name}'\nStart working?"):
@@ -620,14 +623,16 @@ def work_screen(task):
 #
 
 def search_task_main():
-    selected_task = task_select("Search for a task to edit:")
-    if selected_task == "return":
-        return
-
-    else:
-        assert isinstance(selected_task, Task)
-        # TODO: Add a 'modify deadline' option if the task's deadline is mutable.
-        view_task_main(selected_task)
+    while True:
+        selected_task = task_select("Search for a task to edit:")
+        if selected_task is None:
+            continue
+        elif selected_task == "return":
+            break
+        else:
+            assert isinstance(selected_task, Task)
+            # TODO: Add a 'modify deadline' option if the task's deadline is mutable.
+            view_task_main(selected_task)
 
 
 def view_task_main(selected_task):
@@ -768,6 +773,3 @@ if __name__ == "__main__":
 # Next:
 # View comments.
 # Write notes that link back into the DB.
-
-
-# TODO: Implement 'notes', you just changed the schema.
