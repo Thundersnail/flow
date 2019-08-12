@@ -1,0 +1,3 @@
+- Small UI improvements (printing the task name at the start of the view screen)
+- Cleaned up some old comments and code at the end of the file.
+

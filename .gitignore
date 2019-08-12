@@ -2,6 +2,7 @@
 .idea
 .vscode
 _venv
+commit_notes.txt
 files
 *.db
 __pycache__

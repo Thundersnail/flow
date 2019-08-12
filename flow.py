@@ -230,6 +230,14 @@ class Note(object):
 
         return Note(note_id, create_dt, task_id, opt_work_id, user_text, flow_text)
 
+    @staticmethod
+    def html_print_user_text(user_text):
+        if user_text.startswith("#reminder"):
+            return "<sys><u>#reminder</u></sys>" + user_text[len("#reminder"):]
+        else:
+            return user_text
+
+
 
 class Task(object):
     html_beg = """
@@ -373,7 +381,7 @@ class Task(object):
 
             rows = cursor.execute("SELECT id, timestamp, opt_work_id, user_text, flow_text FROM note "
                                   "WHERE task_id=? "
-                                  "ORDER BY timestamp",
+                                  "ORDER BY timestamp DESC",
                                   (self.id,)).fetchall()
             f_print("<h2><sys>Notes:<sys></h2>")
             f_print("<ul>")
@@ -382,7 +390,7 @@ class Task(object):
                 flow_text = flow_text
                 f_print("<li>")
                 f_print(f"<sys>[{timestamp}]</sys><br/>")
-                f_print(f"{user_text}<br/>")
+                f_print(f"{Note.html_print_user_text(user_text)}<br/>")
                 f_print(f"<sys>{flow_text}</sys><br/>")
                 f_print(f"<sys>Note ID: {note_id}</sys><br/>")
                 f_print(f"<sys>Work ID: {opt_work_id}</p>")
@@ -413,6 +421,20 @@ class Task(object):
                 f_print("</ol>")
 
             f_print(Task.html_end)
+
+    @staticmethod
+    def search_reminders(cursor):
+        res = cursor.execute(
+            """SELECT cache_beg_dt, name, id FROM task WHERE id IN 
+                (SELECT task_id FROM note WHERE (user_text LIKE '#reminder%'))
+               ORDER BY cache_beg_dt DESC
+            """)
+
+        def _to_reminder_option(row):
+            task_beg_dt_text, task_name, task_id = row
+            return f"[{task_beg_dt_text}] {task_name}", task_id
+
+        return tuple(map(_to_reminder_option, res.fetchall()))
 
 
 class Work(object):
@@ -725,6 +747,8 @@ def view_task_main(selected_task):
         with connect() as connection:
             selected_task = Task.get(selected_task_id, connection)
 
+        print(f"Task '{selected_task.name}'")
+
         option_tuple = [
             ("Print Record [HTML]", "pf")
         ]
@@ -811,10 +835,20 @@ def create_task_main():
             return
 
 
-def data_main():
-    wipe_print("Data main")
-    print("Bye bye!")
+def view_reminders_main():
 
+    wipe_print("View Reminders")
+    with connect() as connection:
+        cursor = connection.cursor()
+        option_tuples = Task.search_reminders(cursor)
+
+    choice_task_id = combo_input("Select a reminder to view: ", option_tuples, default_key=option_tuples[0][1])
+
+    with connect() as connection:
+        cursor = connection.cursor()
+        task = Task.get(choice_task_id, cursor)
+
+    view_task_main(task)
 
 #
 # UI - Main
@@ -830,6 +864,7 @@ def main():
                 ("Work", 'w'),
                 ("View Tasks", 'vt'),
                 ("Create a Task", "tc"),
+                ("View Reminders", "vr"),
                 ("Quit", 'q')
             )
             choice_id = combo_input("Select a context to navigate to:", choice_tuple, default_key='w')
@@ -839,6 +874,8 @@ def main():
                 search_task_main()
             elif choice_id == 'tc':
                 create_task_main()
+            elif choice_id == "vr":
+                view_reminders_main()
             else:
                 assert choice_id == 'q'
                 print("Bye-bye!")
@@ -849,16 +886,12 @@ def main():
         return
 
 
+def hack():
+    with connect() as connection:
+        cursor = connection.cursor()
+        Task.search_reminders(cursor)
+
+
 if __name__ == "__main__":
     main()
-
-# Commands:
-# flow
-# flow -h
-# flow p[roject] ["task-id-prefix"]
-# flow w[ork] "task-id-prefix"
-# flow w h[elp]
-
-# Next:
-# View comments.
-# Write notes that link back into the DB.
+    # hack()
