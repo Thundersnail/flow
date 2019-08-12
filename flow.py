@@ -152,6 +152,9 @@ def file_path_validator(file_path):
         return ResultFail("The provided file-path cannot be empty.")
 
     dir_path, file_name = path.split(file_path)
+    if not dir_path:
+        dir_path = os.getcwd()
+        
     if not path.exists(dir_path):
         return ResultFail(f"The directory '{dir_path}' does not exist.\n"
                           f"Absolute path: '{path.abspath(dir_path)}'")
