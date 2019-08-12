@@ -14,7 +14,9 @@ import datetime
 #
 #
 
-db_path = path.join(path.dirname(sys.argv[0]), "_db/flow.db")
+root_dir = path.dirname(sys.argv[0])
+db_path = path.join(root_dir, "_db/flow.db")
+db_reset_sql_path = path.join(root_dir, "_db/reset.sql")
 dt_fmt_str_readable = "YYYY/MM/DD HH:MM:SS"
 dt_fmt_str_readable_eg = "1999/02/04 00:15:00"
 dt_fmt_str = "%Y-%m-%d %H:%M:%S"
@@ -181,6 +183,18 @@ def new_record_append_str(date_time, record_name, message):
 IN_PROGRESS_TASK_STATUS = 0
 COMPLETE_TASK_STATUS = 1
 ABANDONED_TASK_STATUS = 2
+
+
+def db_init():
+    if not path.isfile(db_path):
+        # Creating the SQL DB:
+        with open(db_reset_sql_path) as db_reset:
+            init_sql = db_reset.read()
+
+        with connect() as connection:
+            cursor = connection.cursor()
+            for command in init_sql.split(';'):
+                cursor.execute(command)
 
 
 def connect():
@@ -564,7 +578,7 @@ def task_select(desc, only_open=False):
                 cb = confirm("No results found! Continue searching? ", default=True)
                 if not cb:
                     # In these cases, we want to pop to the previous menu.
-                    return None
+                    return "return"
             else:
                 result_tuples_iter = map(lambda p: (p.name, p), result_task_list)
                 result_tuples = list((*result_tuples_iter, ("return to the previous menu.", "return")))
@@ -587,9 +601,7 @@ def work_main():
     while True:
         wipe_print("Work")
         selected_task = task_select("Select an *OPEN* task to start working on:", only_open=True)
-        if selected_task is None:
-            continue
-        elif selected_task == "return":
+        if selected_task == "return":
             break
         elif selected_task:
             assert isinstance(selected_task, Task)
@@ -678,11 +690,9 @@ def work_screen(task):
 def search_task_main():
     while True:
         selected_task = task_select("Search for a task to edit:")
-        if selected_task is None:
-            continue
-        elif selected_task == "return":
+        if selected_task == "return":
             break
-        else:
+        elif selected_task:
             assert isinstance(selected_task, Task)
             # TODO: Add a 'modify deadline' option if the task's deadline is mutable.
             view_task_main(selected_task)
@@ -786,6 +796,8 @@ def data_main():
 #
 
 def main():
+    db_init()
+
     try:
         while True:
             wipe_print("Welcome to Flow!")
