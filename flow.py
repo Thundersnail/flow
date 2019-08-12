@@ -50,8 +50,12 @@ class ResultFail(Result):
         self.msg = msg
 
 
+def round_sec_to_int(sec):
+    return int(round(sec, 0))
+
+
 def sec_to_hms(sec):
-    sec_int = int(round(sec, 0))
+    sec_int = round_sec_to_int(sec)
     min_int = sec_int // 60
     hr_int = min_int // 60
     print_sec = sec_int % 60
@@ -133,7 +137,7 @@ def new_task_name_validator(new_task_name, cursor):
     if not res:
         return res
 
-    cursor.execute("SELECT count(*) FROM task WHERE name=?", (new_task_name,))
+    cursor.execute("SELECT COUNT(*) FROM task WHERE name=?", (new_task_name,))
     if cursor.fetchone()[0] == 0:
         return ResultOk()
     else:
@@ -309,18 +313,28 @@ class Task(object):
                 status_str = f"UNKNOWN ({self.status})"
             f_print(f"<p><sys>Status: {status_str}</sys></p>")
 
-            row = cursor.execute("SELECT sum(cache_duration_sec) FROM work WHERE task_id=?", (self.id,))
+            row = cursor.execute("SELECT SUM(cache_duration_sec) FROM work WHERE task_id=?", (self.id,))
             net_duration_sec = row.fetchone()[0]
-            if net_duration_sec is None:
-                net_duration_sec = 0
-            f_print(f"<p>You have spent {sec_to_hms_str(net_duration_sec)} working on this task so far.</p>")
+            row = cursor.execute("SELECT COUNT(*), sum(duration_sec) FROM break WHERE task_id=?", (self.id,))
+            num_breaks, raw_break_duration_sec = row.fetchone()
+            if raw_break_duration_sec is None:
+                break_duration_sec = 0
+            else:
+                break_duration_sec = round_sec_to_int(raw_break_duration_sec)
+
+            work_duration_sec = net_duration_sec - break_duration_sec
+            f_print(f"<p>You have spent {sec_to_hms_str(work_duration_sec)} working on this task so far. "
+                    f"That's a total of "
+                    f"{sec_to_hms_str(net_duration_sec)} with "
+                    f"{sec_to_hms_str(break_duration_sec)} spent on {num_breaks} breaks.")
+
             f_print("<hr/>")
 
             rows = cursor.execute("SELECT id, timestamp, opt_work_id, user_text, flow_text FROM note "
                                   "WHERE task_id=? "
                                   "ORDER BY timestamp",
                                   (self.id,)).fetchall()
-            f_print("<p>Here are your notes on this project:</p>")
+            f_print("<h2><sys>Notes:<sys></h2>")
             f_print("<ul>")
             for note_id, timestamp, opt_work_id, user_text, flow_text in rows:
                 user_text = user_text
@@ -333,6 +347,29 @@ class Task(object):
                 f_print(f"<sys>Work ID: {opt_work_id}</p>")
                 f_print("</li>")
             f_print("</ul>")
+
+            f_print("<hr/>")
+
+            f_print("<h2><sys>Work and Breaks:</sys></h2>")
+            f_print("<ul>")
+            res = cursor.execute("SELECT id, cache_beg_dt, cache_duration_sec FROM work WHERE task_id=?", (self.id,))
+            for work_id, beg_dt, duration_sec in res:
+                f_print("<li>")
+
+                f_print(f"<sys>[{beg_dt}]</sys><br/>")
+                f_print(f"<sys>Net duration: {sec_to_hms_str(duration_sec)}</sys><br/>")
+
+                agg_res = cursor.execute("SELECT COUNT(*), SUM(duration_sec) FROM break WHERE work_id=?", (work_id,))
+                num_breaks, total_break_duration = agg_res.fetchone()
+                f_print(f"<sys>Breaks: {num_breaks} for {total_break_duration}</sys><br/>")
+
+                f_print("<ol>")
+                break_res = cursor.execute("SELECT id, beg_dt, duration_sec FROM break WHERE work_id=?", (work_id,))
+                for break_id, break_beg_dt, break_duration_sec in break_res:
+                    f_print("<li><sys>")
+                    f_print(f"Break ({break_id}) at [{break_beg_dt}] for {sec_to_hms_str(break_duration_sec)}")
+                    f_print("</sys></li>")
+                f_print("</ol>")
 
             f_print(Task.html_end)
 
@@ -376,11 +413,17 @@ class Work(object):
 
     def save(self, save_dt, cursor):
         self.end_dt = save_dt
-        self.duration_sec = round((save_dt - self.beg_dt).total_seconds(), 0)
+        self.duration_sec = round_sec_to_int((save_dt - self.beg_dt).total_seconds())
+        cursor.execute("UPDATE work SET cache_end_dt=?, cache_duration_sec=? WHERE id=?",
+                       (dt_to_str(self.end_dt), self.duration_sec, self.id))
 
+    @staticmethod
+    def add_break(task_id, work_id, break_start_time, break_end_time, break_duration_sec, cursor):
+        assert task_id
+        assert work_id
         cursor.execute(
-            "UPDATE work SET cache_end_dt=?, cache_duration_sec=? WHERE id=?",
-            (dt_to_str(self.end_dt), self.duration_sec, self.id)
+            "INSERT INTO break (task_id, work_id, beg_dt, end_dt, duration_sec) VALUES (?,?,?,?,?)",
+            (task_id, work_id, dt_to_str(break_start_time), dt_to_str(break_end_time), break_duration_sec)
         )
 
 
@@ -552,11 +595,13 @@ def work_main():
             assert isinstance(selected_task, Task)
             if confirm(f"Selected task: '{selected_task.name}'\nStart working?"):
                 work_screen(selected_task)
+                break
 
 
 def work_screen(task):
     auto_save_msg = ""
 
+    cum_break_sec = 0
     auto_save_interval_sec = 30
     net_elapsed_sec_when_next_auto_save = auto_save_interval_sec
     work_start_time = datetime.datetime.now()
@@ -568,7 +613,8 @@ def work_screen(task):
     while True:
         try:
             # Auto-saving:
-            net_elapsed_sec = (datetime.datetime.now() - work_start_time).total_seconds()
+            raw_net_elapsed_sec = (datetime.datetime.now() - work_start_time).total_seconds()
+            net_elapsed_sec = round_sec_to_int(raw_net_elapsed_sec) - cum_break_sec
             if net_elapsed_sec > net_elapsed_sec_when_next_auto_save:
                 net_elapsed_sec_when_next_auto_save = net_elapsed_sec + auto_save_interval_sec
                 with connect() as connection:
@@ -587,25 +633,32 @@ def work_screen(task):
 
         except KeyboardInterrupt:
             work_end_time = datetime.datetime.now()
+            break_start_time = work_end_time
+
             options = [
                 ("Add Note", "an"),
                 ("Continue Work.", "c"),
                 ("Stop Work.", "s")
             ]
             choice = combo_input(f"Working on {repr(task.name)}: PAUSED", options, default_key='c')
-            if choice == "an":
-                note_text = line_input_text("Enter a note to add: ", non_empty_validator)
-                dt = datetime.datetime.now()
-                with connect() as connection:
-                    cursor = connection.cursor()
+            with connect() as connection:
+                cursor = connection.cursor()
+                if choice == "an":
+                    note_text = line_input_text("Enter a note to add: ", non_empty_validator)
+                    dt = datetime.datetime.now()
                     new_note = Note.new(task.id, new_work.id, dt, note_text, "work-note", cursor)
-                assert new_note.id
-                notify("Note added successfully!")
-            if choice == 'c':
-                continue
-            elif choice == 's':
-                if confirm("Are you sure you want to end this session?"):
-                    break
+                    assert new_note.id
+                    notify("Note added successfully!")
+                if choice == 'c':
+                    break_end_time = datetime.datetime.now()
+                    raw_break_duration_sec = (break_end_time - break_start_time).total_seconds()
+                    break_duration_sec = round_sec_to_int(raw_break_duration_sec)
+                    cum_break_sec += break_duration_sec
+                    Work.add_break(task.id, new_work.id, break_start_time, break_end_time, break_duration_sec, cursor)
+                    continue
+                elif choice == 's':
+                    if confirm("Are you sure you want to end this session?"):
+                        break
 
     user_note = line_input_text("Enter a short note to commemorate this work session: ")
 
@@ -638,9 +691,7 @@ def search_task_main():
 def view_task_main(selected_task):
     while True:
         option_tuple = [
-            ("Print Record [HTML]", "pf"),
-            ("View Work", "vw"),
-            ("Return...", "return"),
+            ("Print Record [HTML]", "pf")
         ]
         info = None
         if selected_task.status == IN_PROGRESS_TASK_STATUS:
@@ -654,10 +705,13 @@ def view_task_main(selected_task):
             info = "This task was abandoned. You may re-open it to add notes and further information."
             option_tuple.append(("Re-open Task", "tro"))
 
+        option_tuple.append(("Return...", "return"))
+
         if info:
             info_str = f"{info}\n"
         else:
             info_str = ""
+
         choice = combo_input(f"{info_str}Choose an action to apply to this task:", option_tuple, default_key="return")
         if choice == "return":
             return
@@ -695,8 +749,6 @@ def view_task_main(selected_task):
                     if confirm("Add note?"):
                         selected_task.add_note()
                         break
-            elif choice == "vw":
-                selected_task.print_to_html(cursor)
 
 
 def create_task_main():
