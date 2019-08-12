@@ -1,4 +1,4 @@
-venv/
+_venv/
 *.db
 __pycache__/*
 *.pyc
